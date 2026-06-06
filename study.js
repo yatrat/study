@@ -1,4 +1,5 @@
-(function() {
+
+  (function() {
     'use strict';
     const SUBJECT_THEME_COLORS = ['#3b82f6', '#10b981', '#ef4444', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#475569'];
 
@@ -1499,7 +1500,7 @@ if (bestStreakEl) {
                 alternateRowStyles: { fillColor: [248, 250, 252] },
                 didDrawPage: (data) => {
                     if (data.pageNumber > pageCount) {
-                        pageCount = data.pageNumber;f
+                        pageCount = data.pageNumber;
                         addFooter(doc, pageCount);
                     }
                 }
@@ -1646,5 +1647,323 @@ if (bestStreakEl) {
     });
 
     document.getElementById('download-pdf-btn-graph').addEventListener('click', generatePDFReport);
+  
+    function validateAndSanitizeBackup(obj) {
+        // Recursive Prototype Pollution check
+        function checkPrototypePollution(val) {
+            if (val && typeof val === 'object') {
+                for (const key in val) {
+                    if (Object.prototype.hasOwnProperty.call(val, key)) {
+                        if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+                            throw new Error("Prototype pollution detected");
+                        }
+                        checkPrototypePollution(val[key]);
+                    }
+                }
+            }
+        }
+        checkPrototypePollution(obj);
 
-})();
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            throw new Error("Root must be an object");
+        }
+        if (!('version' in obj) || !('exportDate' in obj) || !('plannerState' in obj)) {
+            throw new Error("Missing structural backup properties");
+        }
+        if (obj.version !== 1) {
+            throw new Error("Unsupported backup file version");
+        }
+
+        const ps = obj.plannerState;
+        if (!ps || typeof ps !== 'object' || Array.isArray(ps)) {
+            throw new Error("plannerState property must be an object");
+        }
+
+        const requiredKeys = ['subjects', 'timetable', 'studyLogs', 'detailedLogs'];
+        for (const k of requiredKeys) {
+            if (!(k in ps)) {
+                throw new Error("plannerState is missing key: " + k);
+            }
+        }
+
+        const psClean = {};
+        for (const k of requiredKeys) {
+            psClean[k] = ps[k];
+        }
+
+        function sanitizeString(str, maxLength) {
+            if (typeof str !== 'string') {
+                throw new Error("String value expected");
+            }
+            let s = str.trim().replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+            
+            const lower = s.toLowerCase();
+            if (lower.includes("<script") || 
+                lower.includes("javascript:") || 
+                lower.includes("onerror=") || 
+                lower.includes("onclick=") || 
+                lower.includes("onload=")) {
+                throw new Error("Dangerous markup or event handlers detected");
+            }
+            if (lower.includes("function") || lower.includes("=>")) {
+                throw new Error("Executable pattern detected in textual elements");
+            }
+
+            if (s.length > maxLength) {
+                s = s.slice(0, maxLength);
+            }
+            return s;
+        }
+
+        if (!Array.isArray(psClean.subjects)) {
+            throw new Error("subjects must be formatted as an array");
+        }
+        if (psClean.subjects.length > 500) {
+            throw new Error("Exceeded limit of 500 maximum subjects");
+        }
+
+        const validSubjectIds = new Set();
+        const cleanedSubjects = [];
+        const hexColorRegex = /^#[0-9a-fA-F]{3,8}$/;
+
+        for (const sub of psClean.subjects) {
+            if (!sub || typeof sub !== 'object' || Array.isArray(sub)) {
+                throw new Error("Subject items must be valid objects");
+            }
+            if (!('id' in sub) || !('name' in sub) || !('color' in sub)) {
+                throw new Error("Subject is missing properties");
+            }
+            const id = sanitizeString(sub.id, 100);
+            const name = sanitizeString(sub.name, 50);
+            const color = sanitizeString(sub.color, 10);
+
+            if (!id) throw new Error("Subject ID cannot be empty");
+            if (!name) throw new Error("Subject name cannot be empty");
+            if (!hexColorRegex.test(color)) {
+                throw new Error("Subject color must be a valid hex color");
+            }
+            if (validSubjectIds.has(id)) {
+                throw new Error("Subject ID must be unique: " + id);
+            }
+            validSubjectIds.add(id);
+            cleanedSubjects.push({ id, name, color });
+        }
+        psClean.subjects = cleanedSubjects;
+
+        if (!psClean.timetable || typeof psClean.timetable !== 'object' || Array.isArray(psClean.timetable)) {
+            throw new Error("timetable must be a valid object");
+        }
+        const allowedDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        const cleanedTimetable = {};
+
+        for (const day of allowedDays) {
+            cleanedTimetable[day] = [];
+            const slots = psClean.timetable[day];
+            if (slots && Array.isArray(slots)) {
+                for (const slot of slots) {
+                    if (!slot || typeof slot !== 'object' || Array.isArray(slot)) {
+                        throw new Error("Timetable slots must be valid objects");
+                    }
+                    if (!('id' in slot) || !('subjectId' in slot) || !('time' in slot) || !('note' in slot)) {
+                        throw new Error("Timetable slot properties are incomplete");
+                    }
+                    const id = sanitizeString(slot.id, 100);
+                    const subjectId = sanitizeString(slot.subjectId, 100);
+                    const time = sanitizeString(slot.time, 50);
+                    const note = sanitizeString(slot.note, 100);
+
+                    if (!validSubjectIds.has(subjectId)) {
+                        throw new Error("Timetable slot references a non-existent subject ID: " + subjectId);
+                    }
+                    cleanedTimetable[day].push({ id, subjectId, time, note });
+                }
+            }
+        }
+        psClean.timetable = cleanedTimetable;
+
+        if (!psClean.studyLogs || typeof psClean.studyLogs !== 'object' || Array.isArray(psClean.studyLogs)) {
+            throw new Error("studyLogs must be a valid object");
+        }
+        const cleanedStudyLogs = {};
+        for (const key in psClean.studyLogs) {
+            if (Object.prototype.hasOwnProperty.call(psClean.studyLogs, key)) {
+                const subId = sanitizeString(key, 100);
+                if (!validSubjectIds.has(subId)) continue;
+                const mins = psClean.studyLogs[key];
+                if (typeof mins !== 'number' || isNaN(mins) || mins < 0) {
+                    throw new Error("Study log values must be positive numbers");
+                }
+                cleanedStudyLogs[subId] = mins;
+            }
+        }
+        psClean.studyLogs = cleanedStudyLogs;
+
+        if (!Array.isArray(psClean.detailedLogs)) {
+            throw new Error("detailedLogs must be formatted as an array");
+        }
+        if (psClean.detailedLogs.length > 50000) {
+            throw new Error("Exceeded limit of 50000 detailed activity logs");
+        }
+        const cleanedDetailedLogs = [];
+        const oneDayInFuture = Date.now() + 24 * 60 * 60 * 1000;
+
+        for (const log of psClean.detailedLogs) {
+            if (!log || typeof log !== 'object' || Array.isArray(log)) {
+                throw new Error("Detailed log items must be valid objects");
+            }
+            if (!('id' in log) || !('type' in log) || !('minutes' in log) || !('timestamp' in log)) {
+                throw new Error("Detailed log is missing properties");
+            }
+            const id = sanitizeString(log.id, 100);
+            const type = sanitizeString(log.type, 10);
+            if (type !== 'focus' && type !== 'break') {
+                throw new Error("Invalid detailed log activity type: " + type);
+            }
+            const minutes = log.minutes;
+            if (typeof minutes !== 'number' || isNaN(minutes) || minutes < 1 || minutes > 720) {
+                throw new Error("Detailed log activity minutes must be between 1 and 720");
+            }
+            const timestamp = log.timestamp;
+            if (typeof timestamp !== 'number' || isNaN(timestamp) || timestamp <= 0 || timestamp > oneDayInFuture) {
+                throw new Error("Detailed log timestamp format is out of bounds");
+            }
+
+            const cleanLog = { id, type, minutes, timestamp };
+            if (type === 'focus') {
+                if (!('subjectId' in log)) {
+                    throw new Error("Focus detailed log is missing subjectId reference");
+                }
+                const subjectId = sanitizeString(log.subjectId, 100);
+                if (!validSubjectIds.has(subjectId)) {
+                    throw new Error("Focus logs reference non-existent subject ID: " + subjectId);
+                }
+                cleanLog.subjectId = subjectId;
+            }
+            cleanedDetailedLogs.push(cleanLog);
+        }
+        psClean.detailedLogs = cleanedDetailedLogs;
+
+        if (psClean.subjects.length === 0) {
+            psClean.subjects.push({
+                id: "sub-general",
+                name: "General Study",
+                color: "#64748b"
+            });
+        }
+
+        const finalState = JSON.parse(JSON.stringify(psClean));
+        return {
+            version: 1,
+            exportDate: sanitizeString(obj.exportDate, 100),
+            plannerState: finalState
+        };
+    }
+
+    const btnExportBackup = document.getElementById('btn-export-backup');
+    const btnImportBackup = document.getElementById('btn-import-backup');
+    const inputBackupFile = document.getElementById('input-backup-file');
+
+    if (btnExportBackup) {
+        btnExportBackup.addEventListener('click', () => {
+            try {
+                const today = new Date();
+                const yyyy = today.getFullYear();
+                const mm = String(today.getMonth() + 1).padStart(2, '0');
+                const dd = String(today.getDate()).padStart(2, '0');
+                const fileName = `StudyPlanner-Backup-${yyyy}-${mm}-${dd}.json`;
+
+                const backupObj = {
+                    version: 1,
+                    exportDate: today.toISOString(),
+                    plannerState: plannerState
+                };
+
+                const dataBlob = new Blob([JSON.stringify(backupObj, null, 2)], { type: 'application/json' });
+                const downloadUrl = URL.createObjectURL(dataBlob);
+                const downloadAnchor = document.createElement('a');
+                downloadAnchor.href = downloadUrl;
+                downloadAnchor.download = fileName;
+                document.body.appendChild(downloadAnchor);
+                downloadAnchor.click();
+                document.body.removeChild(downloadAnchor);
+                URL.revokeObjectURL(downloadUrl);
+                showToast("Backup exported successfully!", "success");
+            } catch (err) {
+                showToast("Export failed: " + err.message, "error");
+            }
+        });
+    }
+
+    if (btnImportBackup) {
+        btnImportBackup.addEventListener('click', () => {
+            inputBackupFile.value = '';
+            inputBackupFile.click();
+        });
+    }
+
+    if (inputBackupFile) {
+        inputBackupFile.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (!file.name.toLowerCase().endsWith('.json')) {
+                showToast("Invalid file type. Only .json files are allowed.", "error");
+                return;
+            }
+         if (
+    file.type &&
+    file.type !== 'application/json' &&
+    file.type !== 'text/plain'
+) {
+    showToast("Invalid file type.", "error");
+    return;
+}
+         if (file.size > 2 * 1024 * 1024) {
+    showToast("File is too large. Max size is 2 MB.", "error");
+    return;
+}
+            if (file.size === 0) {
+                showToast("Selected file is empty.", "error");
+                return;
+            }
+
+            const confirmMsg = "Importing a backup will replace all current study data. Continue?";
+            if (!confirm(confirmMsg)) {
+                showToast("Import cancelled.", "info");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const text = e.target.result;
+                    if (!text || text.trim() === '') {
+                        throw new Error("File content is empty");
+                    }
+                    const parsed = JSON.parse(text);
+                    const sanitized = validateAndSanitizeBackup(parsed);
+
+                    plannerState = sanitized.plannerState;
+                    localStorage.setItem('studytimer_planner_db_bytes', JSON.stringify(plannerState));
+
+                    syncStudyLogsFromDetailed();
+                    renderSubjectsLists();
+                    renderTimetableSlots();
+                    renderFocusAnalyticsList();
+                    if (typeof renderProgressGraph === 'function') renderProgressGraph();
+                    if (typeof renderDetailedHistoryList === 'function') renderDetailedHistoryList();
+
+                    showToast("Backup successfully restored!", "success");
+                } catch (err) {
+                    showToast("Validation failed: " + err.message, "error");
+                }
+            };
+            reader.onerror = () => {
+                showToast("Error reading file.", "error");
+            };
+            reader.readAsText(file);
+        });
+    }
+
+  })();
+
